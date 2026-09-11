@@ -413,6 +413,7 @@
   <button id="svPngT">PNG 저장 (배경 투명)</button>
   <button id="svJpg">JPG 저장 (흰 배경)</button>
   <button id="svWebp">WebP 저장 (배경 투명·저용량)</button>
+  <button id="svSvg">SVG 저장 (Illustrator 벡터 편집용)</button>
 </div>
 
 <div id="fmtOverlay">
@@ -952,7 +953,7 @@
         <h3>① 상단 메뉴</h3>
         <table class="hTable">
           <tr><td>열기 (JSON)</td><td>저장해 둔 작업 파일(.json)을 불러옵니다.</td></tr>
-          <tr><td>저장</td><td>누르면 저장 형식 선택 팝업이 열립니다 — <b>JSON</b>(작업 파일: 구조·텍스트·화살표 전체, [열기]로 복원), <b>MOL</b>(ChemDraw·ChemSketch·MarvinSketch 등 타 프로그램 호환), <b>PNG</b>(흰 배경/배경 투명), <b>JPG</b>(흰 배경), <b>WebP</b>(배경 투명·저용량). <b>그림 저장은 선택한 구조가 있으면 그 부분만 저장</b>되고, 선택이 없으면 그려진 전체가 저장됩니다. 작업은 브라우저에도 자동 저장되며, 프로그램은 항상 빈 화면으로 시작하고 이전 작업이 있으면 상단 알림의 <b>이어서 작업</b>으로 복구할 수 있습니다.</td></tr>
+          <tr><td>저장</td><td>누르면 저장 형식 선택 팝업이 열립니다 — <b>JSON</b>(작업 파일: 구조·텍스트·화살표 전체, [열기]로 복원), <b>MOL</b>(ChemDraw·ChemSketch·MarvinSketch 등 타 프로그램 호환), <b>PNG</b>(흰 배경/배경 투명), <b>JPG</b>(흰 배경), <b>WebP</b>(배경 투명·저용량), <b>SVG</b>(벡터 — <b>Adobe Illustrator</b>·Inkscape 등에서 열어 선·글자를 개별 편집 가능. Illustrator 전용 .ai 형식은 Adobe의 비공개 형식이라 직접 생성할 수 없으며, SVG가 Illustrator 공식 지원 표준 벡터 형식입니다). <b>그림 저장은 선택한 구조가 있으면 그 부분만 저장</b>되고, 선택이 없으면 그려진 전체가 저장됩니다. 작업은 브라우저에도 자동 저장되며, 프로그램은 항상 빈 화면으로 시작하고 이전 작업이 있으면 상단 알림의 <b>이어서 작업</b>으로 복구할 수 있습니다.</td></tr>
           <tr><td>SMILES 복사</td><td>그린 구조를 SMILES 문자열로 변환해 클립보드에 복사합니다.</td></tr>
           <tr><td>실행 취소/다시 실행</td><td>작업을 되돌리거나 다시 적용합니다 (<kbd>Ctrl+Z</kbd> / <kbd>Ctrl+Y</kbd>).</td></tr>
           <tr><td>전체 화면</td><td>브라우저를 전체 화면으로 전환합니다 (다시 누르면 해제). Windows·Mac 모두 동작하며 <kbd>F11</kbd> 키로도 전환됩니다 (Mac은 <kbd>fn</kbd>+<kbd>F11</kbd> 또는 이 버튼 사용).</td></tr>
@@ -4743,6 +4744,143 @@ document.getElementById("btnPng").onclick=()=>{
   saveCanvasAs(tc, "structure.png", "image/png");
 };
 
+/* ---------- SVG 내보내기 (Adobe Illustrator 등 벡터 프로그램 편집용) ----------
+   drawMolecule이 쓰는 캔버스 명령을 그대로 SVG 요소로 기록하는 가짜 컨텍스트.
+   화면 렌더와 동일한 코드 경로를 지나므로 모양이 픽셀 렌더와 일치한다. */
+function SVGCtx(){
+  this.out=[];
+  this._m=document.createElement("canvas").getContext("2d");   // measureText 위임용
+  this.fillStyle="#000"; this.strokeStyle="#000"; this.lineWidth=1;
+  this.lineCap="butt"; this.lineJoin="miter"; this.globalAlpha=1;
+  this.textAlign="start"; this.textBaseline="alphabetic";
+  this._font="10px sans-serif"; this._dash=[];
+  this._d=""; this._sx=null; this._sy=null; this._cx=null; this._cy=null;
+  this._stack=[];
+}
+(function(){
+  const R=v=>Math.round(v*100)/100;
+  const esc=s=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  // rgba(...)나 hex 색을 (색, 불투명도)로 분해
+  function colParts(c, alpha){
+    c=String(c);
+    const m=c.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\)/);
+    let col=c, op=1;
+    if(m){
+      col="#"+[m[1],m[2],m[3]].map(v=>(+v).toString(16).padStart(2,"0")).join("");
+      if(m[4]!==undefined) op=+m[4];
+    }
+    op*=alpha;
+    return {col, op};
+  }
+  const P=SVGCtx.prototype;
+  Object.defineProperty(P,"font",{
+    get(){ return this._font; },
+    set(v){ this._font=v; this._m.font=v; }
+  });
+  P.setLineDash=function(d){ this._dash=d? d.slice():[]; };
+  P.getLineDash=function(){ return this._dash.slice(); };
+  P.save=function(){
+    this._stack.push({fillStyle:this.fillStyle, strokeStyle:this.strokeStyle, lineWidth:this.lineWidth,
+      lineCap:this.lineCap, lineJoin:this.lineJoin, globalAlpha:this.globalAlpha,
+      textAlign:this.textAlign, textBaseline:this.textBaseline, font:this._font, dash:this._dash.slice()});
+  };
+  P.restore=function(){
+    const s=this._stack.pop(); if(!s) return;
+    this.fillStyle=s.fillStyle; this.strokeStyle=s.strokeStyle; this.lineWidth=s.lineWidth;
+    this.lineCap=s.lineCap; this.lineJoin=s.lineJoin; this.globalAlpha=s.globalAlpha;
+    this.textAlign=s.textAlign; this.textBaseline=s.textBaseline; this.font=s.font; this._dash=s.dash;
+  };
+  P.beginPath=function(){ this._d=""; this._cx=this._cy=this._sx=this._sy=null; };
+  P.moveTo=function(x,y){ this._d+=`M${R(x)} ${R(y)}`; this._cx=x; this._cy=y; this._sx=x; this._sy=y; };
+  P.lineTo=function(x,y){
+    if(this._cx===null) return this.moveTo(x,y);
+    this._d+=`L${R(x)} ${R(y)}`; this._cx=x; this._cy=y;
+  };
+  P.quadraticCurveTo=function(cx,cy,x,y){ this._d+=`Q${R(cx)} ${R(cy)} ${R(x)} ${R(y)}`; this._cx=x; this._cy=y; };
+  P.bezierCurveTo=function(c1x,c1y,c2x,c2y,x,y){ this._d+=`C${R(c1x)} ${R(c1y)} ${R(c2x)} ${R(c2y)} ${R(x)} ${R(y)}`; this._cx=x; this._cy=y; };
+  P.closePath=function(){ if(this._d){ this._d+="Z"; this._cx=this._sx; this._cy=this._sy; } };
+  P.rect=function(x,y,w,h){ this.moveTo(x,y); this.lineTo(x+w,y); this.lineTo(x+w,y+h); this.lineTo(x,y+h); this.closePath(); };
+  P.arc=function(x,y,rad,a0,a1,ccw){
+    let sweep=a1-a0;
+    if(!ccw){ if(sweep<0) sweep+=2*Math.PI*Math.ceil(-sweep/(2*Math.PI)); if(a1-a0>=2*Math.PI) sweep=2*Math.PI; }
+    else    { if(sweep>0) sweep-=2*Math.PI*Math.ceil(sweep/(2*Math.PI));  if(a0-a1>=2*Math.PI) sweep=-2*Math.PI; }
+    const x0=x+rad*Math.cos(a0), y0=y+rad*Math.sin(a0);
+    const xe=x+rad*Math.cos(a0+sweep), ye=y+rad*Math.sin(a0+sweep);
+    if(this._cx===null) this.moveTo(x0,y0); else this.lineTo(x0,y0);
+    if(Math.abs(sweep)>=2*Math.PI-1e-6){                     // 완전한 원: 반원 A 두 개
+      const xm=x+rad*Math.cos(a0+(sweep>0?Math.PI:-Math.PI)), ym=y+rad*Math.sin(a0+(sweep>0?Math.PI:-Math.PI));
+      const sf=sweep>0?1:0;
+      this._d+=`A${R(rad)} ${R(rad)} 0 1 ${sf} ${R(xm)} ${R(ym)}A${R(rad)} ${R(rad)} 0 1 ${sf} ${R(xe)} ${R(ye)}`;
+    }else{
+      this._d+=`A${R(rad)} ${R(rad)} 0 ${Math.abs(sweep)>Math.PI?1:0} ${sweep>0?1:0} ${R(xe)} ${R(ye)}`;
+    }
+    this._cx=xe; this._cy=ye;
+  };
+  P._strokeAttr=function(){
+    const {col,op}=colParts(this.strokeStyle, this.globalAlpha);
+    return `stroke="${col}"${op<1?` stroke-opacity="${R(op)}"`:""} stroke-width="${R(this.lineWidth)}"`+
+      (this.lineCap!=="butt"?` stroke-linecap="${this.lineCap}"`:"")+
+      (this.lineJoin!=="miter"?` stroke-linejoin="${this.lineJoin}"`:"")+
+      (this._dash.length?` stroke-dasharray="${this._dash.map(R).join(" ")}"`:"");
+  };
+  P._fillAttr=function(){
+    const {col,op}=colParts(this.fillStyle, this.globalAlpha);
+    return `fill="${col}"${op<1?` fill-opacity="${R(op)}"`:""}`;
+  };
+  P.stroke=function(){ if(this._d) this.out.push(`<path d="${this._d}" fill="none" ${this._strokeAttr()}/>`); };
+  P.fill=function(){ if(this._d) this.out.push(`<path d="${this._d}" ${this._fillAttr()} stroke="none"/>`); };
+  P.fillRect=function(x,y,w,h){ this.out.push(`<rect x="${R(x)}" y="${R(y)}" width="${R(w)}" height="${R(h)}" ${this._fillAttr()} stroke="none"/>`); };
+  P.strokeRect=function(x,y,w,h){ this.out.push(`<rect x="${R(x)}" y="${R(y)}" width="${R(w)}" height="${R(h)}" fill="none" ${this._strokeAttr()}/>`); };
+  P.clearRect=function(){};
+  P.clip=function(){};
+  P.drawImage=function(){};                                  // 밑그림은 내보내기에 포함하지 않음
+  P.measureText=function(t){ return this._m.measureText(t); };
+  P.strokeText=function(){};
+  P.fillText=function(text,x,y){
+    if(text===""||text==null) return;
+    // 글꼴 문자열 분해: [style] [weight] <size>px <family>
+    const fm=this._font.match(/^\s*(italic\s+)?(bold\s+|[1-9]00\s+)?([\d.]+)px\s+(.+)$/);
+    const fs=fm? parseFloat(fm[3]) : 12;
+    const fam=fm? fm[4] : "sans-serif";
+    const wgt=fm&&fm[2]? fm[2].trim() : null;
+    const ital=fm&&fm[1]? true : false;
+    // 기준선 보정 (캔버스 textBaseline → y 오프셋)
+    let dy=0;
+    const met=this._m.measureText(text);
+    const asc=(met.fontBoundingBoxAscent!==undefined)? met.fontBoundingBoxAscent : fs*0.8;
+    const desc=(met.fontBoundingBoxDescent!==undefined)? met.fontBoundingBoxDescent : fs*0.2;
+    if(this.textBaseline==="middle") dy=(asc-desc)/2;
+    else if(this.textBaseline==="top") dy=asc;
+    else if(this.textBaseline==="bottom") dy=-desc;
+    const anchor=this.textAlign==="center"?"middle":(this.textAlign==="right"||this.textAlign==="end")?"end":"start";
+    const {col,op}=colParts(this.fillStyle, this.globalAlpha);
+    this.out.push(`<text x="${R(x)}" y="${R(y+dy)}" font-family='${fam.replace(/'/g,"")}' font-size="${R(fs)}"`+
+      (wgt?` font-weight="${wgt}"`:"")+(ital?` font-style="italic"`:"")+
+      (anchor!=="start"?` text-anchor="${anchor}"`:"")+
+      ` fill="${col}"${op<1?` fill-opacity="${R(op)}"`:""}>${esc(text)}</text>`);
+  };
+})();
+function buildSVGString(){
+  const bb=contentBounds();
+  if(!bb) return null;
+  const M=40;
+  const minX=bb.minX-M, minY=bb.minY-M;
+  const W=(bb.maxX-bb.minX)+2*M, H=(bb.maxY-bb.minY)+2*M;
+  const rec=new SVGCtx();
+  rec.fillStyle="#ffffff"; rec.fillRect(minX,minY,W,H);     // 흰 배경 (일러스트레이터에서 맨 아래 사각형으로 선택·삭제 가능)
+  drawMolecule(rec,{interactive:false});
+  return `<?xml version="1.0" encoding="UTF-8"?>\n`+
+    `<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="${Math.round(W)}" height="${Math.round(H)}" viewBox="${Math.round(minX*100)/100} ${Math.round(minY*100)/100} ${Math.round(W*100)/100} ${Math.round(H*100)/100}">\n`+
+    `<!-- BOUNDY Chem SVG export — 벡터 편집 가능 (Adobe Illustrator, Inkscape 등) -->\n`+
+    rec.out.join("\n")+`\n</svg>\n`;
+}
+function exportSVGFile(){
+  const s=buildSVGString();
+  if(!s){ alert("내보낼 구조가 없습니다."); return; }
+  saveBlobAs("structure.svg", "image/svg+xml",
+    ()=>Promise.resolve(new Blob([s], {type:"image/svg+xml"})));
+}
+
 // JPG 내보내기 (PNG와 동일 렌더, 흰 배경 JPEG)
 function exportJPG(){
   const bb=contentBounds();
@@ -4856,6 +4994,7 @@ function exportTransparent(mime, fname, quality){
 }
 document.getElementById("svPngT").onclick=()=>{ hideSaveMenu(); withSelectionOnly(()=>exportTransparent("image/png","structure-transparent.png")); };
 document.getElementById("svWebp").onclick=()=>{ hideSaveMenu(); withSelectionOnly(()=>exportTransparent("image/webp","structure.webp",0.92)); };
+document.getElementById("svSvg").onclick =()=>{ hideSaveMenu(); withSelectionOnly(exportSVGFile); };
 
 document.getElementById("btnUndo").onclick=undo;
 document.getElementById("btnRedo").onclick=redo;
